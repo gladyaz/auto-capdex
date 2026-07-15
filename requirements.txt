@@ -1,0 +1,4 @@
+faster-whisper>=1.0.0
+ffmpeg-python>=0.2.0
+googletrans==4.0.0rc1
+PyYAML>=6.0.1

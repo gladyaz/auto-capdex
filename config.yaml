@@ -1,0 +1,158 @@
+# Mandarin-to-Indonesian subtitle pipeline configuration.
+#
+# This file is intentionally usable as-is for the POC flow:
+#   python pipeline.py --input ./input --output ./output --config ./config.yaml
+
+paths:
+  # Source folder containing .mp4 files. The CLI --input option overrides this.
+  input_folder: input
+
+  # Final artifacts are written here: subtitled videos, .srt files, logs, reports,
+  # and job_state.json. The CLI --output option overrides this.
+  output_folder: output
+
+  # Intermediate artifacts live here: extracted audio, transcripts, translations.
+  temp_folder: temp
+
+processing:
+  # Number of videos processed concurrently. Whisper transcription is always
+  # serialized internally regardless of this value (see pipeline.py), so this
+  # mainly controls how many ffmpeg extract/burn + translate stages overlap.
+  # 2 is a safe starting point for an 8-core/8GB machine; raise it and watch
+  # memory/CPU if you have headroom, lower it to 1 to fall back to fully
+  # sequential processing.
+  concurrency_level: 2
+
+  # Delete intermediate audio/transcript/translation files after successful jobs.
+  cleanup_temp_on_success: true
+
+  # Keep failed job artifacts by default so failures can be inspected and retried.
+  cleanup_temp_on_failure: false
+
+transcription:
+  # Supported by the current implementation: faster-whisper.
+  provider: faster-whisper
+
+  # Common faster-whisper sizes: tiny, base, small, medium, large-v3.
+  # Use small for a better accuracy/speed tradeoff on Mandarin speech.
+  model_size: small
+
+  # Mandarin/Chinese source language for faster-whisper.
+  source_language: zh
+
+  # Use auto for local default selection; use cpu/cuda explicitly if needed.
+  device: auto
+
+  # int8 is the fastest CPU compute type with minimal accuracy loss.
+  # "auto" sometimes falls back to float32 on CPU, which is noticeably slower.
+  compute_type: int8
+
+  # Number of CPU threads faster-whisper uses per transcription.
+  # Multi-threaded CPU inference (cpu_threads > 1) is NOT numerically
+  # deterministic run-to-run: floating point reduction order varies with
+  # thread scheduling, which combined with int8 quantization was observed to
+  # produce different transcriptions (including hallucinated repeated text)
+  # for the exact same audio across two runs. 1 trades some raw speed for
+  # reproducible, trustworthy transcripts; concurrency_level above still lets
+  # multiple videos' ffmpeg/translate stages overlap while this stays serial.
+  cpu_threads: 1
+
+  # Beam search width. Lower values transcribe faster with a small accuracy
+  # tradeoff. 5 is faster-whisper's default (best accuracy); try 2-3 for a
+  # meaningful speed gain if transcription is still the bottleneck.
+  beam_size: 5
+
+  # Filter non-speech better so music/background audio is less likely to become subtitle text.
+  # Segments whisper itself flags as likely non-speech (no_speech_prob >= this
+  # value) are dropped entirely and never become a subtitle line.
+  vad_filter: true
+  no_speech_threshold: 0.75
+  condition_on_previous_text: false
+
+  # Second-layer quality guard: whisper can still confidently mis-transcribe
+  # music/noise as repetitive, degenerate text (e.g. the same phrase repeated
+  # many times) without its own no_speech_prob catching it. compression_ratio
+  # measures how repetitive a segment's text is (text_length / gzip_length);
+  # repeated phrases compress very well, giving a high ratio. Segments above
+  # this threshold are dropped. 2.4 is OpenAI Whisper's own standard default
+  # for flagging likely-hallucinated output.
+  compression_ratio_threshold: 2.4
+
+  # Third-layer guard, at word granularity instead of whisper's ~30s decode
+  # chunk granularity. no_speech_prob/compression_ratio above are computed
+  # once per chunk, so a chunk that mixes real dialogue with music/noise can
+  # still slip a full false segment past both. Each transcribed word also has
+  # its own probability; any segment is rebuilt from only its words at or
+  # above this threshold (dropped entirely if none qualify), and the
+  # subtitle's start/end are tightened to the confident words' own span
+  # instead of the whole raw whisper segment - this is what actually catches
+  # music/hallucinated text that the chunk-level filters above miss.
+  min_word_probability: 0.5
+
+translation:
+  # Supported by the current implementation: googletrans.
+  provider: googletrans
+
+  # googletrans uses zh-cn for Simplified Chinese.
+  source_language: zh-cn
+
+  # Indonesian target language.
+  target_language: id
+
+  # Optional API-key environment variable for future paid provider support.
+  # Do not put secrets directly in this file.
+  api_key_env: GOOGLE_TRANSLATE_API_KEY
+
+  # googletrans is an unofficial client that scrapes Google Translate's web
+  # endpoint, not a stable paid API - it can time out or get rate-limited
+  # under sustained load (seen in real batches: 25/74 videos failed on a
+  # single transient timeout each, with zero retries). Each failed segment
+  # request is retried with exponential backoff (2s, 4s, 8s, ...) before the
+  # whole video is marked failed.
+  max_retries: 3
+  retry_backoff_seconds: 2.0
+
+ffmpeg:
+  audio:
+    # Extract audio to temp/{video_name}_audio.wav for transcription.
+    format: wav
+    codec: pcm_s16le
+    sample_rate: 16000
+    channels: 1
+
+  subtitles:
+    # Output video naming: output/{video_name}{output_suffix}.mp4
+    output_suffix: _subtitled
+
+    # Subtitle burn styling. Alignment bottom_center maps to ASS Alignment=2.
+    font: Arial
+    font_size: 9
+    alignment: bottom_center
+    margin_v: 35
+
+    # Lead the Indonesian subtitle so it appears slightly before the spoken line
+    # starts. Now that segments are tightened to confident word timestamps
+    # (see transcription.min_word_probability), start times are much closer to
+    # the real speech onset than before, so a full 1s lead reads as premature.
+    # 0.3s gives a small reading head-start without feeling early. Set to 0 to
+    # disable entirely and show subtitles exactly at the detected word start.
+    subtitle_time_offset_seconds: 0.3
+
+    # Hard cap on how long a single subtitle line can stay on screen, in seconds.
+    # Whisper occasionally reports an end_time far past when a line was actually
+    # spoken (e.g. background music/noise misdetected as speech), which makes a
+    # subtitle linger on screen through a long silence before the next line.
+    # This caps it to start_time + max_display_seconds regardless of what
+    # whisper reported.
+    max_display_seconds: 7.0
+
+    # Keep the original Mandarin subtitles visible and render Indonesian below them.
+    cover_source_subtitles: false
+    cover_source_subtitles_mode: blur
+    cover_band_height_ratio: 0.30
+    cover_band_opacity: 1.0
+    cover_blur_radius: 18
+
+    # Re-encode video to burn subtitles, preserve audio stream by default.
+    video_codec: libx264
+    audio_codec: copy

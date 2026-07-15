@@ -1,0 +1,94 @@
+{
+  "$schema": "https://aka.ms/codetour-schema",
+  "title": "Arsitektur Pipeline auto-capdex (buat utak-atik sendiri)",
+  "description": "Tur lengkap alur pipeline subtitle Mandarin->Indonesia: dari entry point CLI, tiap stage pemrosesan, sampai konfigurasi. Ditulis biar kamu paham di mana harus ubah kode kalau mau tuning/nambah fitur sendiri.",
+  "steps": [
+    {
+      "directory": ".",
+      "title": "1. Orientasi: satu file per concern",
+      "description": "SITUASI: root project ini flat, nggak ada src/ nested.\nMEKANISME: tiap file = satu tanggung jawab (video_scanner, audio_extractor, transcription, translation, subtitle_generator, video_processor) yang di-orchestrate oleh pipeline.py.\nIMPLIKASI: mau ubah 1 tahap (misal transkripsi), kamu cuma perlu buka 1 file, nggak perlu ngerti semuanya.\nGOTCHA: models.py adalah 'kamus bersama' - VideoJob, Config, semua dataclass dipakai LINTAS semua file. Ubah field di sana = ubah kontrak semua stage."
+    },
+    {
+      "file": "pipeline.py",
+      "line": 217,
+      "title": "2. Entry point CLI",
+      "description": "SITUASI: main() dipanggil pas kamu run `python pipeline.py --input ... --output ...`.\nMEKANISME: parse_args() baca argumen CLI, load_config() baca config.yaml, lalu bikin PipelineRunner dan panggil .run().\nIMPLIKASI: kalau mau nambah argumen CLI baru (misal --dry-run), di sinilah tempatnya, di parse_args() baris 201.\nGOTCHA: --input/--output dari CLI OVERRIDE nilai di config.yaml (lihat `replace(load_config(...), input_folder=args.input, ...)`)."
+    },
+    {
+      "file": "config.yaml",
+      "line": 1,
+      "title": "3. Config: tempat 90% tuning kamu bakal terjadi",
+      "description": "SITUASI: semua angka yang kita tuning sepanjang sesi ini (cpu_threads, max_display_seconds, min_word_probability, concurrency_level, dst) hidup di sini.\nMEKANISME: tiap section (paths/processing/transcription/translation/ffmpeg) map 1:1 ke field di Config (models.py).\nIMPLIKASI: buat 80% kebutuhan tuning, kamu CUMA perlu edit angka di sini - nggak perlu sentuh kode Python sama sekali.\nGOTCHA: kalau nambah key baru di sini, kamu WAJIB juga daftarin di models.py (field Config) DAN config_loader.py (cara baca YAML-nya) - kalau lupa salah satu, key baru itu nggak akan ke-load atau bakal error."
+    },
+    {
+      "file": "models.py",
+      "line": 162,
+      "title": "4. Config: dataclass sumber kebenaran",
+      "description": "SITUASI: class Config ini definisi RESMI semua setting yang ada, lengkap sama default value dan validasi (__post_init__).\nMEKANISME: frozen dataclass - immutable, tiap 'ubah' sebenarnya bikin object baru (pola replace()).\nIMPLIKASI: mau tau default value suatu setting kalau nggak di-set di config.yaml? Cek di sini.\nGOTCHA: validasi (misal `if self.concurrency_level <= 0: raise ValueError`) jalan OTOMATIS tiap Config dibikin - kalau kamu kasih angka aneh di config.yaml, errornya bakal muncul pas startup, bukan di tengah proses."
+    },
+    {
+      "file": "models.py",
+      "line": 25,
+      "title": "5. VideoJob: state machine satu video",
+      "description": "SITUASI: VideoJob merepresentasikan progress SATU video, dari PENDING sampai COMPLETED/FAILED.\nMEKANISME: tiap stage (extract audio, transcribe, translate, dst) manggil `job.with_status(...)` yang return VideoJob BARU dengan field terupdate - job lama nggak pernah dimutasi.\nIMPLIKASI: kalau nambah stage baru, kamu bakal nambah JobStatus enum baru (baris 14) dan field path baru di VideoJob.\nGOTCHA: job_id, created_at itu FIXED sejak awal - yang berubah cuma status dan path-path hasil tiap stage."
+    },
+    {
+      "file": "config_loader.py",
+      "line": 40,
+      "title": "6. Jembatan YAML ke Config",
+      "description": "SITUASI: _build_config() baca dict mentah dari YAML dan translate ke Config object.\nMEKANISME: pola konsisten - `transcription.get('key_name', Config.default_value)` - kalau key nggak ada di YAML, jatuh ke default dari Config.\nIMPLIKASI: ini file yang WAJIB kamu sentuh tiap kali nambah config key baru (lihat langkah 3 - gotcha-nya).\nGOTCHA: konversi tipe eksplisit (int(...), float(...), bool(...)) - kalau kamu taruh string di YAML buat field yang harusnya angka, ini bakal raise ConfigError yang jelas, bukan silent bug."
+    },
+    {
+      "directory": ".",
+      "title": "7. Alur 6 tahap: 1 video, dari mp4 ke subtitled mp4",
+      "description": "SITUASI: PipelineRunner._process_job() (pipeline.py baris 156) manggil 6 stage ini berurutan buat SATU video.\nMEKANISME: video_scanner -> audio_extractor -> transcription -> translation -> subtitle_generator -> video_processor.\nIMPLIKASI: tiap panah di alur ini adalah titik kamu bisa 'potong' buat debug (misal cuma jalanin sampai transcription, print hasilnya, stop).\nGOTCHA: tiap stage nerima VideoJob dari stage sebelumnya dan return VideoJob baru - kalau satu stage exception, sisanya nggak jalan, job langsung ditandai FAILED."
+    },
+    {
+      "file": "video_scanner.py",
+      "line": 19,
+      "title": "8. Stage 1: scan input/",
+      "description": "SITUASI: scan() nyari semua .mp4 di folder input, validasi tiap file pakai ffprobe (harus punya audio stream).\nMEKANISME: file yang corrupt/nggak ada audio di-skip (tercatat di skipped_files), bukan bikin seluruh batch gagal.\nIMPLIKASI: mau ganti format input (misal .mkv juga diterima)? Di sinilah filter ekstensinya.\nGOTCHA: ini stage SATU-SATUNYA yang jalan sebelum concurrency - dia scan semua video dulu baru dibagi ke worker thread."
+    },
+    {
+      "file": "audio_extractor.py",
+      "line": 25,
+      "title": "9. Stage 2: extract audio (ffmpeg)",
+      "description": "SITUASI: extract() manggil `ffmpeg` sebagai subprocess buat convert video jadi .wav mono 16kHz (format yang whisper suka).\nMEKANISME: parameter ffmpeg (sample_rate, channels, codec) datang dari config.ffmpeg_audio.\nIMPLIKASI: stage ini AMAN diparalelkan (concurrency_level) karena tiap panggilan ffmpeg itu subprocess terpisah, nggak share state.\nGOTCHA: kalau ffmpeg/ffprobe nggak ada di PATH, errornya di-raise sebagai ExtractionError yang jelas nyebut 'FFmpeg executable not found'."
+    },
+    {
+      "file": "transcription.py",
+      "line": 23,
+      "title": "10. Stage 3: whisper transcription (paling kompleks)",
+      "description": "SITUASI: FasterWhisperProvider bungkus faster-whisper (CTranslate2). Ini stage paling banyak kita tuning sesi ini.\nMEKANISME: transcribe() (baris 58) manggil model SEKALI per audio, lalu hasil segments-nya disaring 3 lapis: no_speech_prob (per-chunk), compression_ratio (deteksi hallucination), lalu _build_confident_segment() (baris 92, PALING PRESISI - per KATA, bukan per chunk).\nIMPLIKASI: kalau musik/noise masih lolos jadi subtitle, PERTAMA cek min_word_probability di config.yaml sebelum sentuh kode.\nGOTCHA: model di-load SEKALI di __init__ (baris ~39-44) dan DIPAKAI BARENG lintas video via lock di pipeline.py - jangan kaget kalau lihat cuma 1 kali 'loading model' di log meski proses 74 video."
+    },
+    {
+      "file": "translation.py",
+      "line": 83,
+      "title": "11. Stage 4: googletrans + retry",
+      "description": "SITUASI: _translate_with_retry() ini fix terakhir kita - retry exponential backoff (2s, 4s, 8s) kalau googletrans timeout.\nMEKANISME: tiap SEGMENT subtitle = 1 request terpisah ke Google (lihat loop for segment in transcript.segments di GoogleTranslateProvider.translate(), baris 47).\nIMPLIKASI: googletrans itu unofficial/scraping, bukan API resmi - kalau mau lebih stabil jangka panjang, ganti provider ini ke API berbayar (DeepL/Google Cloud Translate resmi) tanpa ubah TranslationService di baris 116.\nGOTCHA: makin banyak segment per video = makin banyak request = makin gampang kena rate-limit. Kalau sering timeout, pertimbangkan turunin concurrency_level dulu sebelum nambah max_retries."
+    },
+    {
+      "file": "subtitle_generator.py",
+      "line": 43,
+      "title": "12. Stage 5: generate .srt",
+      "description": "SITUASI: build_srt_content() bikin format .srt dari Translation, dengan 2 penyesuaian waktu: subtitle_time_offset_seconds (geser lebih awal dikit) dan max_display_seconds (cap durasi tampil).\nMEKANISME: pure function, gampang di-test tanpa I/O - bagus kalau kamu mau eksperimen logic timing baru.\nIMPLIKASI: SEMUA masalah 'subtitle kecepetan/kelambatan/nyangkut' yang kita benerin sesi ini pusatnya di sini.\nGOTCHA: fungsi ini TERPISAH dari SubtitleGenerator class di atasnya (baris 13) - class-nya cuma urusan file I/O, logic timing murni ada di function level supaya testable."
+    },
+    {
+      "file": "video_processor.py",
+      "line": 27,
+      "title": "13. Stage 6: burn subtitle ke video (ffmpeg)",
+      "description": "SITUASI: burn_subtitles() render file .srt langsung ke frame video pakai ffmpeg subtitles filter.\nMEKANISME: font/size/posisi/warna diatur config.ffmpeg_subtitles - ini stage paling berat CPU-nya (re-encode video, libx264).\nIMPLIKASI: mau ganti style subtitle (font, posisi, background blur buat nutup subtitle asli)? Semua opsinya udah ada di config.yaml, cek _build_ffmpeg_command() buat lihat command ffmpeg persisnya.\nGOTCHA: ini stage TERAKHIR - kalau gagal di sini, audio+transcript+translate yang udah selesai TETAP kesimpen di temp/ (kecuali cleanup_temp_on_success), jadi nggak perlu ulang dari nol."
+    },
+    {
+      "file": "pipeline.py",
+      "line": 91,
+      "title": "14. Orchestration: concurrency & lock whisper",
+      "description": "SITUASI: run() ini jantung eksekusi paralel - ThreadPoolExecutor (baris 125) jalanin N video sekaligus (concurrency_level).\nMEKANISME: SEMUA stage boleh paralel KECUALI transcribe() - itu dikunci via self._transcription_lock (lihat _process_job baris 156) karena whisper model instance-nya di-share, dan CPU udah disaturasi cpu_threads config.\nIMPLIKASI: mau nambah stage paralel baru yang JUGA butuh diserialize (misal kalau ganti provider yang stateful)? Pola lock yang sama bisa dipakai ulang.\nGOTCHA: state_lock (di dalam run(), bukan attribute) ngelock DUA hal sekaligus - update list jobs DAN nulis job_state.json - supaya nggak ada race condition pas 2 video selesai bersamaan."
+    },
+    {
+      "directory": ".",
+      "title": "15. Cheat sheet: mau ubah apa, buka file mana",
+      "description": "Ringkasan cepat buat kamu balik lagi ke sini kapan-kapan:\n- Tuning angka (speed/kualitas/timing) -> config.yaml SAJA, nggak perlu sentuh .py\n- Subtitle timing/durasi aneh -> subtitle_generator.py\n- Musik/noise jadi subtitle -> transcription.py (min_word_probability) atau config.yaml\n- Translation gagal/lambat -> translation.py (retry logic) atau ganti provider\n- Mau nambah config key baru -> WAJIB 3 tempat: config.yaml, models.py (Config field), config_loader.py (parsing)\n- Style/posisi subtitle di video -> video_processor.py + config.yaml ffmpeg.subtitles\n- Batch besar lambat -> pipeline.py (concurrency_level) atau tests/ buat coba skenario baru dulu sebelum production run\nSemua perubahan kode WAJIB lewat test dulu (tests/test_*.py, pola: tulis test gagal dulu -> baru implement -> jalanin `python -m unittest discover -s tests`)."
+    }
+  ]
+}
