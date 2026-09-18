@@ -6,12 +6,14 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Iterable, TextIO
 
 from audio_extractor import AudioExtractor
 from cleanup import CleanupManager
 from config_loader import load_config
+from folder_titles import FolderTitleTranslator
+from image_assets import copy_folder_images
 from job_logger import JobLogger
 from models import Config, JobStatus, VideoJob
 from retry_manager import RetryManager
@@ -44,6 +46,7 @@ class PipelineRunner:
         job_logger: JobLogger | None = None,
         retry_manager: RetryManager | None = None,
         cleanup_manager: CleanupManager | None = None,
+        title_translator: FolderTitleTranslator | None = None,
         progress_writer: TextIO | None = sys.stdout,
     ):
         self.config = config
@@ -80,6 +83,13 @@ class PipelineRunner:
         )
         self.retry_manager = retry_manager or RetryManager()
         self.cleanup_manager = cleanup_manager or CleanupManager(config=config)
+        # Drama folder titles reuse the subtitle translation provider already
+        # configured above, so no additional provider or API key is involved.
+        self.title_translator = title_translator or FolderTitleTranslator(
+            translator=getattr(self.translation_service, "provider", None),
+            source_language=config.translation_source_language,
+            target_language=config.target_language,
+        )
         self.progress_writer = progress_writer
         # Faster-whisper's compute_type/cpu_threads tuning already saturates the
         # machine's performance cores for one job; running transcribe() from two
@@ -94,6 +104,12 @@ class PipelineRunner:
 
         state_file = self.config.output_folder / "job_state.json"
         jobs = self._load_or_scan_jobs(state_file, resume=resume)
+        if not resume:
+            # Resumed jobs already carry the output name chosen by the original
+            # run; re-translating could pick a different Indonesian title and
+            # scatter one drama across two output folders.
+            jobs = self._apply_translated_output_folders(jobs)
+        self._copy_drama_folder_images(jobs)
 
         total_jobs = len(jobs)
         pending_indices = [
@@ -153,6 +169,60 @@ class PipelineRunner:
             )
         return jobs
 
+    def _apply_translated_output_folders(self, jobs: list[VideoJob]) -> list[VideoJob]:
+        """Give each job an output name whose drama folder is Indonesian.
+
+        Source folders are never renamed: only the job's output_name changes,
+        which is what the SRT and burned-video writers build their paths from.
+        Translation happens once per drama folder and is cached for every
+        episode inside it.
+        """
+        updated = list(jobs)
+        for index, job in enumerate(updated):
+            source_folder = _drama_folder_name(job.video_name)
+            if source_folder is None:
+                continue
+
+            title = self.title_translator.resolve(source_folder)
+            if title.output_name == source_folder:
+                continue
+
+            updated[index] = replace(
+                job,
+                output_name=_replace_drama_folder(job.video_name, title.output_name),
+            )
+        return updated
+
+    def _copy_drama_folder_images(self, jobs: Iterable[VideoJob]) -> None:
+        """Copy poster/cover artwork into each translated output folder."""
+        for source_folder, output_folder in _drama_folder_pairs(jobs):
+            report = copy_folder_images(
+                self.config.input_folder / source_folder,
+                self.config.output_folder / output_folder,
+            )
+            for destination in report.copied:
+                self.job_logger.log_image_copied(
+                    self.config.input_folder / source_folder / destination.name,
+                    destination,
+                )
+            for image_path, reason in report.failed:
+                self.job_logger.log_image_copy_failure(image_path, reason)
+
+    def _drama_folder_manifest(self, jobs: Iterable[VideoJob]) -> list[dict[str, object]]:
+        manifest: list[dict[str, object]] = []
+        for source_folder, output_folder in _drama_folder_pairs(jobs):
+            entry: dict[str, object] = {
+                "source_folder_name": source_folder,
+                "translated_folder_name": output_folder,
+            }
+            title = self.title_translator.cached(source_folder)
+            if title is not None:
+                entry["title_translated"] = title.translated
+                if title.error is not None:
+                    entry["title_translation_error"] = title.error
+            manifest.append(entry)
+        return manifest
+
     def _process_job(self, job: VideoJob) -> VideoJob:
         job = self.audio_extractor.extract(job)
         with self._transcription_lock:
@@ -169,9 +239,11 @@ class PipelineRunner:
     def _write_final_artifacts(self, jobs: Iterable[VideoJob]) -> None:
         self.job_logger.write_processing_log(self.config.output_folder / "processing.log")
         self.job_logger.write_failed_jobs(self.config.output_folder / "failed_jobs.txt")
+        job_list = list(jobs)
         self.job_logger.generate_batch_report(
             self.config.output_folder / "batch_report.json",
-            list(jobs),
+            job_list,
+            drama_folders=self._drama_folder_manifest(job_list),
         )
 
     def _write_progress(self, completed: int, total: int, job: VideoJob) -> None:
@@ -223,6 +295,31 @@ def main(argv: list[str] | None = None) -> int:
     )
     summary = PipelineRunner(config=config).run(resume=args.resume)
     return 1 if summary.failure_count else 0
+
+
+def _drama_folder_name(relative_name: str | None) -> str | None:
+    """Return the top-level drama folder of a job's relative name, if any."""
+    if not relative_name:
+        return None
+
+    parts = PurePosixPath(relative_name).parts
+    return parts[0] if len(parts) > 1 else None
+
+
+def _replace_drama_folder(relative_name: str, output_folder: str) -> str:
+    parts = PurePosixPath(relative_name).parts
+    return PurePosixPath(output_folder, *parts[1:]).as_posix()
+
+
+def _drama_folder_pairs(jobs: Iterable[VideoJob]) -> list[tuple[str, str]]:
+    """Map each source drama folder to its output folder, in scan order."""
+    pairs: dict[str, str] = {}
+    for job in jobs:
+        source_folder = _drama_folder_name(job.video_name)
+        if source_folder is None or source_folder in pairs:
+            continue
+        pairs[source_folder] = _drama_folder_name(job.output_name) or source_folder
+    return list(pairs.items())
 
 
 def _build_summary(jobs: Iterable[VideoJob], total_seconds: float) -> PipelineSummary:

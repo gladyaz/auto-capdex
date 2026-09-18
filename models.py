@@ -26,6 +26,9 @@ class VideoJob:
     job_id: str
     video_path: Path
     video_name: Optional[str] = None
+    # Relative output name, identical to video_name unless the drama folder
+    # title was translated for the output tree. Source files are never renamed.
+    output_name: Optional[str] = None
     status: JobStatus = JobStatus.PENDING
     created_at: datetime = field(default_factory=utc_now)
     updated_at: datetime = field(default_factory=utc_now)
@@ -42,6 +45,9 @@ class VideoJob:
 
         if self.video_name is None:
             object.__setattr__(self, "video_name", video_path.stem)
+
+        if self.output_name is None:
+            object.__setattr__(self, "output_name", self.video_name)
 
         for field_name in (
             "audio_path",

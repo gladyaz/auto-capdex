@@ -76,6 +76,50 @@ Notes:
 - `cleanup_temp_on_success` removes intermediate audio/transcript/translation files after success.
 - `cleanup_temp_on_failure` defaults to `false` so failed jobs keep artifacts for debugging.
 
+## Drama Folders, Titles, and Artwork
+
+When the input folder holds one subfolder per drama, the pipeline mirrors that
+structure into the output folder with an Indonesian folder title:
+
+```text
+input/                                  output/
+  143-老公突然有了读心术/          ->     143-Suamiku Tiba-Tiba Bisa Membaca Pikiran/
+    001.mp4                               001.srt
+    002.mp4                               001_subtitled.mp4
+    poster.jpg                            002.srt
+    thumbnail.png                         002_subtitled.mp4
+                                          poster.jpg
+                                          thumbnail.png
+```
+
+Behaviour:
+
+- **Source folders are never renamed or modified.** Only the newly created
+  output folder uses the Indonesian title.
+- The numeric catalogue prefix (`4-`, `12-`, `143-`, `114-`) is carried across
+  untranslated, and an episode count such as `（85集）` becomes `(85 Episode)`.
+- The title is translated **once per drama folder** by the same `googletrans`
+  provider already used for subtitles, then cached for every episode in that
+  folder. No extra provider and no API key are involved.
+- Output folder names are sanitized for Windows: the reserved characters
+  `< > : " / \ | ? *` are replaced, reserved device names (`CON`, `PRN`, `AUX`,
+  `NUL`, `COM1`-`COM9`, `LPT1`-`LPT9`) are escaped, trailing dots and spaces are
+  removed, and `/` or `\` can never create an accidental subdirectory.
+- If two dramas translate to the same Indonesian title, the numeric prefix keeps
+  them apart; without prefixes a `-2`, `-3` suffix is appended so neither folder
+  overwrites the other.
+- If title translation fails, the batch continues and that folder falls back to
+  its original name. The failure is logged and recorded in `batch_report.json`.
+- `.jpg`, `.jpeg`, `.png`, and `.webp` files are copied byte-for-byte into the
+  translated output folder, keeping their original filenames. They are never
+  re-encoded, resized, OCR'd, or treated as video inputs. A failed image copy is
+  logged and does not stop video processing.
+- `batch_report.json` records the mapping under `drama_folders` as
+  `source_folder_name` / `translated_folder_name`.
+
+On `--resume`, the output folder name stored in `job_state.json` is reused, so a
+resumed batch never re-translates a title or splits one drama across two folders.
+
 ## Output Structure
 
 Typical output after a batch run:

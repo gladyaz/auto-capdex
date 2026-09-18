@@ -5,7 +5,7 @@ import traceback
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable, Iterable, Optional
+from typing import Callable, Iterable, Mapping, Optional
 
 from models import JobStatus, VideoJob
 
@@ -103,6 +103,38 @@ class JobLogger:
             }
         )
 
+    def log_image_copied(self, image_path: str | Path, destination_path: str | Path) -> None:
+        self.log_entries.append(
+            {
+                "timestamp": self._timestamp(),
+                "event": "image_copied",
+                "image_filename": Path(image_path).name,
+                "image_path": str(image_path),
+                "destination_path": str(destination_path),
+                "status": "copied",
+            }
+        )
+
+    def log_image_copy_failure(self, image_path: str | Path, reason: str) -> None:
+        path = Path(image_path)
+        error_text = f"Image copy failed: {reason}"
+        self.failed_jobs.append(
+            {
+                "video_filename": path.name,
+                "error": error_text,
+            }
+        )
+        self.log_entries.append(
+            {
+                "timestamp": self._timestamp(),
+                "event": "image_copy_failed",
+                "image_filename": path.name,
+                "image_path": str(path),
+                "status": "failed",
+                "error": error_text,
+            }
+        )
+
     def write_processing_log(self, log_file: str | Path) -> None:
         path = Path(log_file)
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -125,6 +157,7 @@ class JobLogger:
         self,
         report_file: str | Path,
         jobs: Iterable[VideoJob],
+        drama_folders: Iterable[Mapping[str, object]] | None = None,
     ) -> dict[str, object]:
         job_list = list(jobs)
         end_time = self.clock()
@@ -145,6 +178,7 @@ class JobLogger:
             "pending_count": pending_count,
             "success_rate": success_count / len(job_list) if job_list else 0.0,
             "total_processing_seconds": total_seconds,
+            "drama_folders": [dict(folder) for folder in (drama_folders or [])],
             "jobs": [_job_to_dict(job) for job in job_list],
         }
 
@@ -165,6 +199,7 @@ def _job_to_dict(job: VideoJob) -> dict[str, Optional[str]]:
         "job_id": job.job_id,
         "video_path": str(job.video_path),
         "video_name": job.video_name,
+        "output_name": job.output_name,
         "status": job.status.value,
         "created_at": job.created_at.isoformat(),
         "updated_at": job.updated_at.isoformat(),

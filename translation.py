@@ -80,6 +80,22 @@ class GoogleTranslateProvider(TranslationProvider):
             source_transcript=transcript.source_audio,
         )
 
+    def translate_text(self, text: str, source_language: str, target_language: str) -> str:
+        """Translate a single standalone string, e.g. a drama folder title.
+
+        Shares the retry/backoff behaviour used for subtitle segments so a
+        transient googletrans failure does not immediately fall back.
+        """
+        if not text.strip():
+            return ""
+
+        try:
+            response = self._translate_with_retry(text, source_language, target_language)
+        except Exception as error:
+            raise TranslationError(f"Text translation failed: {error}") from error
+
+        return str(response.text).strip()
+
     def _translate_with_retry(self, text: str, source_language: str, target_language: str) -> Any:
         last_error: Exception | None = None
         for attempt in range(self.max_retries + 1):

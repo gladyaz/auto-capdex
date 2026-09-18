@@ -37,7 +37,9 @@ class SubtitleGenerator:
         return job.with_status(JobStatus.SRT_GENERATED, srt_path=srt_path)
 
     def _srt_output_path(self, job: VideoJob) -> Path:
-        return self.config.output_folder / f"{job.video_name}.srt"
+        # output_name mirrors video_name unless the drama folder title was
+        # translated, in which case only the output tree uses the new name.
+        return self.config.output_folder / f"{job.output_name}.srt"
 
 
 def build_srt_content(

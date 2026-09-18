@@ -54,7 +54,9 @@ class VideoProcessor:
 
     def _output_video_path(self, job: VideoJob) -> Path:
         suffix = self.config.ffmpeg_subtitles.output_suffix
-        return self.config.output_folder / f"{job.video_name}{suffix}.mp4"
+        # output_name mirrors video_name unless the drama folder title was
+        # translated, in which case only the output tree uses the new name.
+        return self.config.output_folder / f"{job.output_name}{suffix}.mp4"
 
     def _build_ffmpeg_command(
         self,
