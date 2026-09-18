@@ -1,14 +1,44 @@
+# Python environments
 .venv/
+venv/
 __pycache__/
 *.pyc
 *.pyo
 *.pyd
 
-input/*.mp4
+# Source drama media. "input/*.mp4" only matched the top level, so episodes and
+# artwork inside per-drama subfolders (input/143-<drama>/001.mp4) were trackable.
+input/**
+!input/.gitkeep
+!input/metadata.json
+
+# Generated artifacts. output/ is recreated by the pipeline at runtime, so it
+# needs no .gitkeep; temp/ keeps one so the folder survives a fresh clone.
 output/*
-!output/.gitkeep
 temp/*
 !temp/.gitkeep
 
 test_input/
 test_output/
+
+# Secrets and credentials
+.env
+.env.*
+*.pem
+*.key
+credentials.json
+
+# Model weights and caches (faster-whisper downloads to ~/.cache by default)
+*.bin
+*.pt
+*.onnx
+models/
+.cache/
+
+# Vendored third-party clone kept locally only; it carries its own .git
+CLEAR/
+
+# OS cruft
+.DS_Store
+Thumbs.db
+desktop.ini
